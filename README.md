@@ -39,9 +39,13 @@ Two files is intentional — everything that can live in Lua does, so there's no
 
 ## Installation
 
-1. Clone this repo (or copy `conky.conf` and `widget.lua`) into a folder of your choice, e.g. `~/.conky/conky-system/`.
-2. Edit `widget.lua`'s `CFG` table for your machine (see below).
-3. Run it directly:
+```bash
+git clone https://github.com/wim66/conky-system-redone.git ~/.conky/conky-system
+cd ~/.conky/conky-system
+```
+
+1. Open `widget.lua` and edit the `CFG` table for your machine (see below) — at minimum, set `network_iface`.
+2. Run it directly:
    ```bash
    conky -c conky.conf
    ```

@@ -3,7 +3,7 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>conky-system-redone — liquid glass for your desktop</title>
+<title>conky-system — liquid glass for your desktop</title>
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
 <link href="https://fonts.googleapis.com/css2?family=Space+Mono:wght@400;700&family=JetBrains+Mono:wght@400;500;600&display=swap" rel="stylesheet">
@@ -245,7 +245,7 @@
         no dependencies to untangle. Just <code>widget.lua</code>.
       </p>
       <div class="cta-row">
-        <a class="btn btn-primary" href="https://github.com/wim66">View on GitHub</a>
+        <a class="btn btn-primary" href="https://github.com/wim66/conky-system-redone">View on GitHub</a>
         <a class="btn btn-ghost" href="#install">Read the install steps</a>
       </div>
     </div>
@@ -347,15 +347,15 @@
     <div class="steps">
       <div class="step glass">
         <div class="n">1</div>
-        <h3>Copy the files</h3>
-        <p>Put <code>conky.conf</code> and <code>widget.lua</code> in a folder of your choice.</p>
-        <code class="line">~/.conky/conky-system/</code>
+        <h3>Clone the repo</h3>
+        <p>Pull the two files down straight from GitHub.</p>
+        <code class="line">git clone https://github.com/wim66/conky-system-redone.git ~/.conky/conky-system</code>
       </div>
       <div class="step glass">
         <div class="n">2</div>
         <h3>Set your CFG</h3>
         <p>Open <code>widget.lua</code>, set your network interface and AUR helper.</p>
-        <code class="line">nano widget.lua</code>
+        <code class="line">cd ~/.conky/conky-system && nano widget.lua</code>
       </div>
       <div class="step glass">
         <div class="n">3</div>

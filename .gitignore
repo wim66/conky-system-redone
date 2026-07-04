@@ -1,0 +1,15 @@
+# Ignore temporary files
+temp/*
+*tmp
+*kopie*
+
+# Ignore directory metadata files
+*.directory
+
+# Ignore text files
+*.txt
+
+# Ignore system files
+.DS_Store
+Thumbs.db
+

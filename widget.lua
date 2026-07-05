@@ -173,27 +173,41 @@ local function get_cpu_temp()
     end)
 end
 
--- Updates: prefer apt-check if present (Debian/Ubuntu), fall back to
--- checkupdates (Arch/pacman). Returns up to 2 display lines.
+-- Detect the system's package manager once (doesn't change at runtime).
+-- More robust than checking for a single hardcoded binary path like
+-- apt-check, which isn't guaranteed to be installed on every Debian/
+-- Ubuntu/Mint system.
+local function get_pkg_manager()
+    return cached("pkg_manager", 86400, function()
+        local p = shell("command -v pacman 2>/dev/null")
+        if p and p ~= "" then return "pacman" end
+        local a = shell("command -v apt 2>/dev/null")
+        if a and a ~= "" then return "apt" end
+        return "none"
+    end) or "none"
+end
+
+-- Updates: pacman (checkupdates) on Arch, `apt list --upgradable` on
+-- Debian/Ubuntu/Mint -- picked via get_pkg_manager() rather than probing
+-- for one specific apt-check binary that may not be installed.
 local function get_updates_lines()
     return cached("updates", 1800, function()
-        local apt_path = "/usr/lib/update-notifier/apt-check"
-        local f = io.open(apt_path, "r")
-        if f then
-            f:close()
-            local out = shell(apt_path .. " --human-readable 2>&1") or ""
-            local l1, l2 = out:match("([^\n]*)\n?([^\n]*)")
-            return { l1 or "", l2 or "" }
+        local mgr = get_pkg_manager()
+        if mgr == "pacman" then
+            local n = shell("checkupdates 2>/dev/null | wc -l")
+            return { (tonumber(n) or 0) .. " updates available (pacman)" }
+        elseif mgr == "apt" then
+            local n = shell("apt list --upgradable 2>/dev/null | tail -n +2 | wc -l")
+            return { (tonumber(n) or 0) .. " updates available (apt)" }
         end
-        local n = shell("checkupdates 2>/dev/null | wc -l")
-        return { (tonumber(n) or 0) .. " updates available (pacman)" }
+        return { "No supported package manager found" }
     end) or {}
 end
 
--- AUR updates via yay/paru, set with CFG.aur_helper ("yay", "paru", or ""
--- to disable). Cached on the same interval as the official updates check,
--- since both are equally slow network/database calls.
+-- AUR only makes sense on an Arch/pacman system -- skip it entirely
+-- elsewhere instead of silently printing "0 AUR updates" on Mint/Ubuntu.
 local function get_aur_updates_line()
+    if get_pkg_manager() ~= "pacman" then return nil end
     if CFG.aur_helper ~= "yay" and CFG.aur_helper ~= "paru" then
         return nil
     end
@@ -431,6 +445,18 @@ local function draw_mem(cr, x, y, w, h)
     draw_bar(cr, x, y + 38, w, 10, pct)
 end
 
+-- /home counts as "separate" only if it's a different filesystem than /
+-- (compared by device id via stat, cached -- this never changes at runtime).
+local function has_separate_home()
+    local v = cached("separate_home", 86400, function()
+        local root_id = shell("stat -c %d / 2>/dev/null")
+        local home_id = shell("stat -c %d /home 2>/dev/null")
+        return root_id ~= nil and root_id ~= "" and home_id ~= nil and home_id ~= "" and root_id ~= home_id
+    end)
+    if v == nil then return true end -- unknown yet: assume separate, don't hide data
+    return v
+end
+
 local function draw_disks(cr, x, y, w, h)
     local function disk_row(label, path, yy)
         local used = conky_parse("${fs_used " .. path .. "}")
@@ -440,8 +466,15 @@ local function draw_disks(cr, x, y, w, h)
         draw_bar(cr, x, yy + 6, w, 9, pct)
     end
     draw_text(cr, x, y + 10, "Disks", 12, CFG.colors.accent2, 1, true)
-    disk_row("Root", "/", y + 30)
-    disk_row("Home", "/home", y + 70)
+    disk_row(has_separate_home() and "Root" or "/", "/", y + 30)
+    if has_separate_home() then
+        disk_row("Home", "/home", y + 70)
+    end
+end
+
+-- Box height now depends on whether /home is a separate partition.
+local function disks_section_height()
+    return has_separate_home() and 132 or 92
 end
 
 local function draw_network(cr, x, y, w, h)
@@ -504,12 +537,16 @@ local SECTIONS = {
     { height = 112, draw = draw_sysinfo },
     { height = 95,  draw = draw_cpu },
     { height = 70,  draw = draw_mem },
-    { height = 132, draw = draw_disks },
+    { height = disks_section_height, draw = draw_disks },
     { height = 132, draw = draw_network },
     { height = 140, draw = draw_processes },
     { height = 80,  draw = draw_updates },
     { height = 72,  draw = draw_datetime },
 }
+
+local function sec_h(sec)
+    return type(sec.height) == "function" and sec.height() or sec.height
+end
 
 local function update_history()
     local cpu = tonumber(conky_parse("${cpu cpu0}")) or 0
@@ -528,9 +565,10 @@ local function draw_all(cr, canvas_w)
     local y = CFG.top_margin
 
     for _, sec in ipairs(SECTIONS) do
-        draw_glass_box(cr, x, y, w, sec.height)
-        sec.draw(cr, x + CFG.pad, y + CFG.pad, w - 2 * CFG.pad, sec.height - 2 * CFG.pad)
-        y = y + sec.height + CFG.gap
+        local h = sec_h(sec)
+        draw_glass_box(cr, x, y, w, h)
+        sec.draw(cr, x + CFG.pad, y + CFG.pad, w - 2 * CFG.pad, h - 2 * CFG.pad)
+        y = y + h + CFG.gap
     end
 end
 

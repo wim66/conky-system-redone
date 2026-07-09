@@ -2,22 +2,9 @@
     widget.lua
     conky-system, all-Lua/Cairo rebuild of the original TEXT-based
     conky-system.conf, in a single file.
-
-    Follows the conky-widget-builder skill conventions:
-    - no global leakage (everything local, state in W / CFG)
-    - no blocking I/O in conky_main: all shell-outs (lsb_release, cpuinfo,
-      sensors, checkupdates/apt-check) go through the generic cached()
-      helper, wrapped in pcall, on a per-source refresh interval
-    - portable drawing surface: conky_surface() preferred, cairo_xlib
-      fallback for builds without it
-    - avoids Lua 5.3+-only bitwise operators (>>, &) in hex_to_rgb, since
-      some Conky packages still ship an older Lua 5.1 build
-    - single file by design (explicit user preference: fewest files
-      possible) -- helpers are kept generic/reused rather than duplicated
-      per section
 --]]
 
-require("cairo")
+pcall(require, "cairo")
 
 -- Portable drawing-surface helper: prefer conky_surface() (X11 + Wayland),
 -- fall back to cairo_xlib_surface_create for builds without it.
@@ -152,6 +139,14 @@ local function push_value(buffer, maxlen, value)
     if #buffer > maxlen then table.remove(buffer, 1) end
 end
 
+-- locale-safe: treat "," as a decimal point rather than letting tonumber()
+-- silently return nil on a comma-decimal locale (e.g. "12,3" -> 0 via the
+-- usual `or 0` fallback, instead of the real 12.3)
+local function num(s)
+    if s == nil then return 0 end
+    return tonumber((tostring(s):gsub(",", "."))) or 0
+end
+
 -- ==================== cached data sources ====================
 
 local function get_distro()
@@ -167,9 +162,56 @@ local function get_cpu_model()
     end) or "Unknown CPU"
 end
 
+-- Locate the CPU package/die temperature sensor directly via hwmon sysfs
+-- (the same data `sensors` reads), instead of parsing sensors' human-
+-- formatted text or hardcoding a hwmon index that differs between
+-- machines/reboots. The hwmon path itself is stable for the life of a
+-- boot -- only the reading changes -- so the *path* is cached long, the
+-- *value* short.
+local function find_cpu_temp_sensor()
+    return cached("cpu_temp_path", 86400, function()
+        local dirs = shell("ls -d /sys/class/hwmon/hwmon*/ 2>/dev/null") or ""
+        for dir in dirs:gmatch("[^\n]+") do
+            local nf = io.open(dir .. "name", "r")
+            if nf then
+                local chip = nf:read("*l") or ""
+                nf:close()
+                if chip == "coretemp" or chip == "k10temp" or chip == "zenpower" then
+                    -- prefer a temp input explicitly labeled package/Tctl/Tdie;
+                    -- fall back to the first available temp input if this
+                    -- chip exposes no _label files at all
+                    local fallback_input = nil
+                    for i = 1, 12 do
+                        local input_path = dir .. "temp" .. i .. "_input"
+                        local lf = io.open(dir .. "temp" .. i .. "_label", "r")
+                        if lf then
+                            local label = (lf:read("*l") or ""):lower()
+                            lf:close()
+                            if label:find("package") or label:find("tctl") or label:find("tdie") then
+                                return input_path
+                            end
+                        elseif not fallback_input and io.open(input_path, "r") then
+                            fallback_input = input_path
+                        end
+                    end
+                    return fallback_input
+                end
+            end
+        end
+        return nil
+    end)
+end
+
 local function get_cpu_temp()
-    return cached("cpu_temp", 5, function()
-        return shell("sensors 2>/dev/null | grep -i package | awk '{print $4}'")
+    local path = find_cpu_temp_sensor()
+    if not path then return nil end
+    return cached("cpu_temp", 3, function()
+        local f = io.open(path, "r")
+        if not f then return nil end
+        local raw = tonumber(f:read("*l"))
+        f:close()
+        if not raw then return nil end
+        return string.format("+%.1f°C", raw / 1000)
     end)
 end
 
@@ -197,7 +239,12 @@ local function get_updates_lines()
             local n = shell("checkupdates 2>/dev/null | wc -l")
             return { (tonumber(n) or 0) .. " updates available (pacman)" }
         elseif mgr == "apt" then
-            local n = shell("apt list --upgradable 2>/dev/null | tail -n +2 | wc -l")
+            -- Match on content ("/" appears in every real "pkg/repo version
+            -- arch [upgradable from: ...]" line) rather than assuming a
+            -- fixed header-line position: apt sends its "Listing..." status
+            -- to stderr on some versions and stdout on others, so a
+            -- position-based `tail -n +2` isn't reliable either way.
+            local n = shell("apt list --upgradable 2>/dev/null | grep -c '/'")
             return { (tonumber(n) or 0) .. " updates available (apt)" }
         end
         return { "No supported package manager found" }
@@ -426,7 +473,7 @@ local function draw_sysinfo(cr, x, y, w, h)
 end
 
 local function draw_cpu(cr, x, y, w, h)
-    local cpu_pct = tonumber(conky_parse("${cpu cpu0}")) or 0
+    local cpu_pct = num(conky_parse("${cpu cpu0}"))
     local temp = get_cpu_temp()
     local label = temp and temp ~= "" and ("CPU  " .. temp) or "CPU"
     draw_text(cr, x, y + 12, label, 12, CFG.colors.accent2, 1, true)
@@ -438,7 +485,7 @@ end
 local function draw_mem(cr, x, y, w, h)
     local used = conky_parse("${mem}")
     local free = conky_parse("${memeasyfree}")
-    local pct = tonumber(conky_parse("${memperc}")) or 0
+    local pct = num(conky_parse("${memperc}"))
     draw_text(cr, x, y + 12, "Memory", 12, CFG.colors.accent2, 1, true)
     draw_text(cr, x, y + 30, "Used: " .. used, 10, CFG.colors.text, 0.9)
     draw_text(cr, x + w, y + 30, "Free: " .. free, 10, CFG.colors.text, 0.9, false, "right")
@@ -461,7 +508,7 @@ local function draw_disks(cr, x, y, w, h)
     local function disk_row(label, path, yy)
         local used = conky_parse("${fs_used " .. path .. "}")
         local free = conky_parse("${fs_free " .. path .. "}")
-        local pct = tonumber(conky_parse("${fs_used_perc " .. path .. "}")) or 0
+        local pct = num(conky_parse("${fs_used_perc " .. path .. "}"))
         draw_text(cr, x, yy, label .. "  Used: " .. used .. "  Free: " .. free, 10, CFG.colors.text, 0.9)
         draw_bar(cr, x, yy + 6, w, 9, pct)
     end
@@ -502,7 +549,7 @@ local function draw_processes(cr, x, y, w, h)
     draw_text(cr, x, y + 10, "Processes", 12, CFG.colors.accent2, 1, true)
     for i = 1, 6 do
         local name = conky_parse("${top name " .. i .. "}")
-        local cpu = tonumber(conky_parse("${top cpu " .. i .. "}")) or 0
+        local cpu = num(conky_parse("${top cpu " .. i .. "}"))
         local yy = y + 10 + i * 18
         draw_text(cr, x, yy, name, 10, CFG.colors.text, 0.85)
         draw_text(cr, x + w - 4, yy, string.format("%5.2f%%", cpu), 10, CFG.colors.text, 0.85, false, "right")
@@ -549,13 +596,13 @@ local function sec_h(sec)
 end
 
 local function update_history()
-    local cpu = tonumber(conky_parse("${cpu cpu0}")) or 0
+    local cpu = num(conky_parse("${cpu cpu0}"))
     push_value(W.cpu_hist, CFG.graph_points, cpu)
 
-    local up = tonumber(conky_parse("${upspeedf " .. CFG.network_iface .. "}")) or 0
+    local up = num(conky_parse("${upspeedf " .. CFG.network_iface .. "}"))
     push_value(W.up_hist, CFG.graph_points, up)
 
-    local down = tonumber(conky_parse("${downspeedf " .. CFG.network_iface .. "}")) or 0
+    local down = num(conky_parse("${downspeedf " .. CFG.network_iface .. "}"))
     push_value(W.down_hist, CFG.graph_points, down)
 end
 
@@ -581,7 +628,14 @@ function conky_main()
     if not surface then return end
     local cr = cairo_create(surface)
 
-    draw_all(cr, conky_window and conky_window.width or 280)
+    cairo_set_operator(cr, CAIRO_OPERATOR_CLEAR)
+    cairo_paint(cr)
+    cairo_set_operator(cr, CAIRO_OPERATOR_OVER)
+
+    local ok, err = pcall(draw_all, cr, conky_window and conky_window.width or 280)
+    if not ok then
+        io.stderr:write("widget.lua draw error: " .. tostring(err) .. "\n")
+    end
 
     cairo_destroy(cr)
     if owns_surface then

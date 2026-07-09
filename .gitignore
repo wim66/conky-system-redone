@@ -5,6 +5,7 @@ temp/*
 
 # Ignore directory metadata files
 *.directory
+.vscode
 
 # Ignore text files
 *.txt

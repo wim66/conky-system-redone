@@ -33,6 +33,22 @@ end
 
 local CFG = {
     network_iface = "enp0s31f6", -- change to your primary network interface
+
+    -- CPU temperature normally auto-prefers coretemp/k10temp/zenpower (the
+    -- CPU's own on-die sensor) over a motherboard Super I/O chip's "CPU"
+    -- reading (an external socket thermistor -- see find_cpu_temp_sensor
+    -- below for why). Set this to a specific hwmon chip name, e.g.
+    -- "nct6687", to always prefer that chip's reading instead -- useful if
+    -- you'd simply rather see your motherboard's socket temp. Leave nil
+    -- for the automatic behavior.
+    preferred_temp_chip = nil,
+
+    -- Shows an extra DEBUG box at the bottom with the values this widget
+    -- auto-detected (CPU temp sensor chip/path, package manager, whether
+    -- /home is a separate partition, window size...) -- useful when
+    -- something looks wrong and you need to see what the widget itself
+    -- thinks is true about the system. Off by default.
+    debug = false,
     font = "DejaVu Sans Mono",
     margin = 14,       -- outer margin, left/right
     top_margin = 14,
@@ -162,43 +178,85 @@ local function get_cpu_model()
     end) or "Unknown CPU"
 end
 
+-- Chips that expose ONLY CPU temperature(s) -- safe to fall back to their
+-- first temp*_input if no _label files exist at all. These read the CPU's
+-- own on-die digital thermal sensor directly and are always preferred.
+local CPU_ONLY_CHIPS = { coretemp = true, k10temp = true, zenpower = true }
+
+-- Motherboard Super I/O chips that also expose a CPU reading, but alongside
+-- many unrelated sensors (VRM, chipset, board, fans...). Their "CPU" input
+-- is normally an external thermistor near the socket, not the die itself --
+-- it can differ from the true CPU temp by several degrees, so these are
+-- only used when no CPU_ONLY_CHIPS is present at all, and only ever via an
+-- explicit label match, never a blind "first temp input" guess.
+local MULTI_SENSOR_CHIPS = { nct6687 = true, nct6775 = true, nct6776 = true, it8688 = true }
+
+-- Scans every hwmon dir for chips in `chip_set`, returning the first
+-- temp*_input whose label matches package/Tctl/Tdie/cpu. If `allow_fallback`
+-- is true and a matching chip has no _label files at all, its first temp
+-- input is used instead of matching nothing.
+local function scan_hwmon(dirs, chip_set, allow_fallback)
+    for dir in dirs:gmatch("[^\n]+") do
+        local nf = io.open(dir .. "name", "r")
+        if nf then
+            local chip = nf:read("*l") or ""
+            nf:close()
+            if chip_set[chip] then
+                local fallback_input = nil
+                for i = 1, 16 do
+                    local input_path = dir .. "temp" .. i .. "_input"
+                    local lf = io.open(dir .. "temp" .. i .. "_label", "r")
+                    if lf then
+                        -- note: label is lowercased here, so search terms
+                        -- must be lowercase too -- searching for "CPU"
+                        -- against an already-lowercased label never
+                        -- matches (that was the bug in an earlier patch)
+                        local label = (lf:read("*l") or ""):lower()
+                        lf:close()
+                        if label:find("package") or label:find("tctl")
+                           or label:find("tdie") or label:find("cpu") then
+                            return input_path
+                        end
+                    elseif allow_fallback and not fallback_input and io.open(input_path, "r") then
+                        fallback_input = input_path
+                    end
+                end
+                if fallback_input then return fallback_input end
+            end
+        end
+    end
+    return nil
+end
+
 -- Locate the CPU package/die temperature sensor directly via hwmon sysfs
 -- (the same data `sensors` reads), instead of parsing sensors' human-
 -- formatted text or hardcoding a hwmon index that differs between
 -- machines/reboots. The hwmon path itself is stable for the life of a
 -- boot -- only the reading changes -- so the *path* is cached long, the
 -- *value* short.
+--
+-- Two passes across ALL hwmon dirs, not one combined pass: a system can
+-- have both coretemp AND a motherboard Super I/O chip (e.g. nct6687) at
+-- once, and hwmon enumeration order isn't guaranteed to put coretemp
+-- first. Without this, whichever chip happens to sort first would win --
+-- on at least one reported system, that put nct6687's socket-thermistor
+-- "CPU" reading (57.5C) ahead of coretemp's actual Package reading
+-- (56.0C), the exact class of mismatch this function exists to avoid.
 local function find_cpu_temp_sensor()
     return cached("cpu_temp_path", 86400, function()
         local dirs = shell("ls -d /sys/class/hwmon/hwmon*/ 2>/dev/null") or ""
-        for dir in dirs:gmatch("[^\n]+") do
-            local nf = io.open(dir .. "name", "r")
-            if nf then
-                local chip = nf:read("*l") or ""
-                nf:close()
-                if chip == "coretemp" or chip == "k10temp" or chip == "zenpower" then
-                    -- prefer a temp input explicitly labeled package/Tctl/Tdie;
-                    -- fall back to the first available temp input if this
-                    -- chip exposes no _label files at all
-                    local fallback_input = nil
-                    for i = 1, 12 do
-                        local input_path = dir .. "temp" .. i .. "_input"
-                        local lf = io.open(dir .. "temp" .. i .. "_label", "r")
-                        if lf then
-                            local label = (lf:read("*l") or ""):lower()
-                            lf:close()
-                            if label:find("package") or label:find("tctl") or label:find("tdie") then
-                                return input_path
-                            end
-                        elseif not fallback_input and io.open(input_path, "r") then
-                            fallback_input = input_path
-                        end
-                    end
-                    return fallback_input
-                end
-            end
+
+        if CFG.preferred_temp_chip then
+            local forced = scan_hwmon(dirs, { [CFG.preferred_temp_chip] = true }, true)
+            if forced then return forced end
+            -- named chip not found/no usable temp input on it -- fall
+            -- through to the automatic logic below rather than showing
+            -- nothing
         end
-        return nil
+
+        local cpu_vendor_match = scan_hwmon(dirs, CPU_ONLY_CHIPS, true)
+        if cpu_vendor_match then return cpu_vendor_match end
+        return scan_hwmon(dirs, MULTI_SENSOR_CHIPS, false)
     end)
 end
 
@@ -571,6 +629,42 @@ local function draw_updates(cr, x, y, w, h)
     end
 end
 
+-- Derives the containing hwmon chip's name from a "...tempN_input" path,
+-- for display in the debug output (find_cpu_temp_sensor() itself only
+-- needs the path, not the human-readable chip name).
+local function chip_name_for_path(path)
+    local dir = path and path:match("^(.*/)[^/]+$")
+    if not dir then return "?" end
+    local f = io.open(dir .. "name", "r")
+    if not f then return "?" end
+    local name = f:read("*l") or "?"
+    f:close()
+    return name
+end
+
+-- Prints what the widget auto-detected to the terminal/log (stdout via
+-- `print`, so it shows up wherever conky's own output goes -- the terminal
+-- if run in the foreground, journalctl/a log file if run as a service).
+-- Rate-limited through cached() so it prints once per interval instead of
+-- once per tick.
+local function print_debug_info()
+    if not CFG.debug then return end
+    cached("debug_print", 10, function()
+        local temp_path = find_cpu_temp_sensor()
+        local win = conky_window and (conky_window.width .. "x" .. conky_window.height) or "?"
+
+        print("---- widget.lua debug (" .. os.date("%H:%M:%S") .. ") ----")
+        print("CPU temp chip:   " .. (temp_path and chip_name_for_path(temp_path) or "none found"))
+        print("CPU temp path:   " .. (temp_path or "-"))
+        print("Pkg manager:     " .. get_pkg_manager())
+        print("/home separate:  " .. tostring(has_separate_home()))
+        print("Net iface (cfg): " .. CFG.network_iface)
+        print("Window size:     " .. win)
+
+        return true -- cached() only re-runs fn() once `true` is stale again
+    end)
+end
+
 local function draw_datetime(cr, x, y, w, h)
     local date_str = conky_parse("${time %A, %d %B, %Y}")
     local time_str = conky_parse("${time %H:%M}")
@@ -623,6 +717,7 @@ end
 
 function conky_main()
     update_history()
+    print_debug_info()
 
     local surface, owns_surface = get_draw_surface()
     if not surface then return end

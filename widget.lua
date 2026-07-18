@@ -61,6 +61,13 @@ local CFG = {
     -- check below. Set to "yay", "paru", or "" to disable AUR checking.
     aur_helper = "yay",
 
+    -- Adds a "N updates available (Flatpak)" line to the Updates box.
+    -- Off by default: not everyone uses Flatpak, and checking involves a
+    -- `flatpak update --appstream` metadata refresh every 30 minutes.
+    -- Safe to leave on even without Flatpak installed -- it's simply
+    -- skipped if the `flatpak` binary isn't found.
+    show_flatpak_updates = false,
+
     -- Layer 1 is the base glass fill behind every box -- the one layer
     -- worth tuning per-wallpaper, since a busier/brighter background
     -- often wants a darker or more opaque base to keep text readable.
@@ -319,6 +326,29 @@ local function get_aur_updates_line()
     return cached("updates_aur", 1800, function()
         local n = shell(CFG.aur_helper .. " -Qua 2>/dev/null | wc -l")
         return (tonumber(n) or 0) .. " AUR updates available (" .. CFG.aur_helper .. ")"
+    end)
+end
+
+-- Flatpak is independent of the OS package manager, so this is checked
+-- separately from get_pkg_manager()/get_updates_lines() above -- gated by
+-- CFG.show_flatpak_updates and only shown if the `flatpak` binary is
+-- actually present. `flatpak update --appstream` refreshes each remote's
+-- metadata before counting; skipping that step can otherwise report
+-- "ghost" updates for packages that were already updated (a known
+-- flatpak quirk -- see flatpak/flatpak#3748). `remote-ls --updates`
+-- prints one line per updatable ref and no header line, so a plain
+-- `wc -l` is an exact count.
+local function get_flatpak_updates_line()
+    if not CFG.show_flatpak_updates then return nil end
+    local has_flatpak = cached("has_flatpak", 86400, function()
+        local p = shell("command -v flatpak 2>/dev/null")
+        return p ~= nil and p ~= ""
+    end)
+    if not has_flatpak then return nil end
+    return cached("updates_flatpak", 1800, function()
+        shell("flatpak update --appstream >/dev/null 2>&1")
+        local n = shell("flatpak remote-ls --updates 2>/dev/null | wc -l")
+        return (tonumber(n) or 0) .. " updates available (Flatpak)"
     end)
 end
 
@@ -623,10 +653,22 @@ local function draw_updates(cr, x, y, w, h)
     end
     local aur_line = get_aur_updates_line()
     if aur_line then table.insert(lines, aur_line) end
+    local flatpak_line = get_flatpak_updates_line()
+    if flatpak_line then table.insert(lines, flatpak_line) end
 
     for i, l in ipairs(lines) do
         draw_text(cr, x, y + 14 + i * 16, l, 10, CFG.colors.text, 0.85)
     end
+end
+
+-- Box height now depends on how many update lines are actually shown
+-- (pacman/apt always, AUR and/or Flatpak only if enabled and detected) --
+-- same pattern as disks_section_height() below.
+local function updates_section_height()
+    local lines = 1 -- pacman/apt always shows a line, even if "0 updates"
+    if get_aur_updates_line() then lines = lines + 1 end
+    if get_flatpak_updates_line() then lines = lines + 1 end
+    return 2 * CFG.pad + 28 + lines * 16
 end
 
 -- Derives the containing hwmon chip's name from a "...tempN_input" path,
@@ -681,7 +723,7 @@ local SECTIONS = {
     { height = disks_section_height, draw = draw_disks },
     { height = 132, draw = draw_network },
     { height = 140, draw = draw_processes },
-    { height = 80,  draw = draw_updates },
+    { height = updates_section_height, draw = draw_updates },
     { height = 72,  draw = draw_datetime },
 }
 
